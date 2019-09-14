@@ -1,0 +1,175 @@
+Using SQL to determine which subsystems are active or not
+---------------------------------------------------------
+list all subsystems and whether they are active
+When I wrote about how it is possible to check if a subsystem is active or not someone asked me if there is a way to list all the subsystems and whether they are active or not.
+
+Having had some time to "play" I have developed a way of doing this by combining data from the following two SQL table functions:
+
+OBJECT_STATISTICS
+ACTIVE_JOB_INFO
+I can get a list of all subsystem description objects by using the OBJECT_STATISTICS table function:
+
+01  SELECT OBJLONGSCHEMA,OBJNAME
+02    FROM TABLE(QSYS2.OBJECT_STATISTICS('*ALL','SBSD')) A
+03   ORDER BY 2,1
+Line 1: I just want the object library and object name returned in the results.
+
+Line 2: OBJECT_STATISTICS allows me to select which libraries and object types I want returned. In this case the *ALL means all libraries, and SBSD is subsystem descriptions.
+
+Line 3: Rather than list the column names I want to order the results by I can use their column position. In this examples I want to order first by the object name, and then by its library.
+
+The IBM i partition I ran this statement on has the following subsystem description objects:
+
+OBJLONGSCHEMA  OBJNAME
+-------------  -----------
+QSYS           QBASE
+QSYS           QBATCH
+QSYS           QCMN
+QSYS           QCTL
+-              QDSNX
+QGPL           QFNC
+QHTTPSVR       QHTTPSVR
+QSYS           QINTER
+-              QLPINSTALL
+QSYS           QPGMR
+QSYS           QSERVER
+QSYS           QSNADS
+QSYS           QSPL
+QSYS           QSYSSBSD
+QSYS           QSYSWRK
+QSYS           QUSRWRK
+QGPL           RZKHWORK
+Just because the subsystem object exists does not mean that it is active. This is where the ACTIVE_JOB_INFO table function comes into play. I noticed that for every active subsystem there was a job where the JOB_TYPE column contained the value 'SBS'. This information allows me to get a list of active subsystems by using this SQL statement.
+
+01  SELECT SUBSYSTEM,SUBSYSTEM_LIBRARY_NAME
+02    FROM TABLE(QSYS2.ACTIVE_JOB_INFO()) B
+03   WHERE JOB_TYPE = 'SBS'
+04   ORDER BY 1
+Line 1: I want the subsystem name and the library it is in returned in the results.
+
+line 3: Only where the JOB_TYPE is equal to 'SBS'.
+
+Line 4: And order by subsystem name.
+
+The results are as follows:
+
+SUBSYSTEM  SUBSYSTEM_LIBRARY_NAME
+---------  ----------------------
+QBATCH     QSYS
+QCMN       QSYS
+QCTL       QSYS
+QINTER     QSYS
+QSERVER    QSYS
+QSPL       QSYS
+QSYSWRK    QSYS
+QUSRWRK    QSYS
+RZKHWORK   QGPL
+And now to combine the two:
+
+01  SELECT DISTINCT
+02      CAST(A.OBJLONGSCHEMA AS CHAR(10)) AS "Library",
+03      A.OBJNAME AS "Subsystem",
+04      CASE WHEN B.SUBSYSTEM IS NULL THEN 'Inactive'
+05      ELSE 'Active'
+06      END as "Status"
+07     FROM TABLE(QSYS2.OBJECT_STATISTICS('*ALL','SBSD')) A
+08      LEFT OUTER JOIN TABLE(QSYS2.ACTIVE_JOB_INFO()) B
+09        ON A.OBJNAME = B.SUBSYSTEM
+10       AND A.OBJLONGSCHEMA = B.SUBSYSTEM_LIBRARY_NAME
+11   ORDER BY 2,1
+Line 1: This is one type of Select I don't think I have used in a post in this blog before: SELECT DISTINCT. What this does is return only those rows that are distinct (different), in other words if there are repeating rows in the results only one is returned. I need this as without it I will get multiple rows returned from the active subsystems, one row for each job active within the subsystem.
+
+Line 2: I am casting the 128 long object schema name from the OBJECT_STATISTICS into a ten long library name, notice that the column heading "Library" is within double apostrophes ( " ).
+
+Line 3: Object name, that will contain the subsystem name.
+
+Line 4 - 6: I am using the CASE statement to make this column be either 'Active' or 'Inactive'. When I perform the test for null I have to say IS NOT NULL as a column cannot be equal to null. If the column is null then this statement will put 'Inactive' in the column. If it is not null then 'Active'.
+
+Lines 7 – 10: This is the part that joins the two table functions with a LEFT OUTER JOIN. This means that if no match is found to the subsystem description returned by OBJECT_STATISTICS in ACTIVE_JOB_INFO then the third column will be null. If it a match is found the third column will contain the subsystem name. Why do we not see that in the results? Lines 4 – 6 overwrite the value in the third column.
+
+Line 11: I want to order my results by library and then by subsystem.
+
+The results look like:
+
+Library     Subsystem   Status
+----------  ----------  ----------
+QSYS        QBASE       Inactive
+QSYS        QBATCH      Active
+QSYS        QCMN        Active
+QSYS        QCTL        Active
+-           QDSNX       Inactive
+QGPL        QFNC        Inactive
+QHTTPSVR    QHTTPSVR    Inactive
+QSYS        QINTER      Active
+-           QLPINSTALL  Inactive
+QSYS        QPGMR       Inactive
+QSYS        QSERVER     Active
+QSYS        QSNADS      Inactive
+QSYS        QSPL        Active
+QSYS        QSYSSBSD    Inactive
+QSYS        QSYSWRK     Active
+QSYS        QUSRWRK     Active
+QGPL        RZKHWORK    Active
+No one wants to key that statement in every time they want these results. I created myself a SQL View that I could use:
+
+01  CREATE OR REPLACE VIEW MYLIB.SBSSTATUS
+02    (SBSLIB,SBSNAME,SBSSTS)
+03  AS SELECT DISTINCT
+04         CAST(A.OBJLONGSCHEMA AS CHAR(10)),
+05         A.OBJNAME,
+06         CASE WHEN B.SUBSYSTEM IS NULL THEN 'Inactive'
+07         ELSE 'Active'
+08         END
+09       FROM TABLE(QSYS2.OBJECT_STATISTICS('*ALL','SBSD')) A
+10         LEFT OUTER JOIN TABLE(QSYS2.ACTIVE_JOB_INFO()) B
+12           ON A.OBJNAME = B.SUBSYSTEM
+13          AND A.OBJLONGSCHEMA = B.SUBSYSTEM_LIBRARY_NAME ;
+
+14  LABEL ON COLUMN SBSSTATUS
+15   (SBSLIB IS 'Library',
+16   SBSNAME IS 'Subsystem',
+17    SBSSTS IS 'Status') ;
+
+18  LABEL ON COLUMN SBSSTATUS
+19   (SBSLIB TEXT IS 'Subsystem library',
+20   SBSNAME TEXT IS 'Subsystem name',
+21    SBSSTS TEXT IS 'Subsystem status') ;
+
+22  LABEL ON TABLE SBSSTATUS IS 'Subsystem statuses' ;
+Lines 1: My view will be called SBSSTATUS.
+
+Line 2: It will contain three columns.
+
+Lines 3 – 13: This is my previous SQL Select statement.
+
+Lines 14 – 17: Giving the columns the equivalent of column headings.
+
+Lines 18 – 21: Giving the columns the equivalent of column text.
+
+Line 22: Giving the generated object a system description.
+
+Now whenever I want to know the status of the subsystems I can just use the following SQL statement:
+
+SELECT * FROM MYLIB.SBSSTATUS
+ ORDER BY 2,1
+The results look the same as the combined SQL statement:
+
+SBSLIB      SBSNAME     SBSSTS
+----------  ----------  ----------
+QSYS        QBASE       Inactive
+QSYS        QBATCH      Active
+QSYS        QCMN        Active
+QSYS        QCTL        Active
+-           QDSNX       Inactive
+QGPL        QFNC        Inactive
+QHTTPSVR    QHTTPSVR    Inactive
+QSYS        QINTER      Active
+-           QLPINSTALL  Inactive
+QSYS        QPGMR       Inactive
+QSYS        QSERVER     Active
+QSYS        QSNADS      Inactive
+QSYS        QSPL        Active
+QSYS        QSYSSBSD    Inactive
+QSYS        QSYSWRK     Active
+QSYS        QUSRWRK     Active
+QGPL        RZKHWORK    Active
